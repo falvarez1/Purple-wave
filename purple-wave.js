@@ -19,6 +19,8 @@ const COLOR_CREST     = '#c4b5fd';  // bright lavender (crests)
 const BLOOM_STRENGTH  = 0.8;
 const BLOOM_RADIUS    = 0.6;
 const BLOOM_THRESHOLD = 0.0;
+const MOUSE_RADIUS    = 20.0;       // disturbance radius in world units
+const MOUSE_STRENGTH  = 1.0;        // max disturbance multiplier
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── GLSL: Ashima 3-D simplex noise ─────────────────────────────────────────
@@ -78,6 +80,9 @@ ${SNOISE_GLSL}
 
 uniform float uTime;
 uniform float uAmplitude;
+uniform vec3  uMouseWorld;
+uniform float uMouseStrength;
+uniform float uMouseRadius;
 attribute vec2 aGridCoord;
 varying float vElevation;
 varying float vDistance;
@@ -104,6 +109,14 @@ void main(){
              * uAmplitude * 0.65;
 
   float elevation = n1 + n2 + n3 + sine;
+
+  // ── Mouse disturbance — high-freq turbulence near cursor ──
+  float mouseDist = length(aGridCoord - uMouseWorld.xz);
+  float mouseInfluence = smoothstep(uMouseRadius, 0.0, mouseDist);
+  float turb = snoise(vec3(aGridCoord * 0.12, t * 4.0)) * 2.5
+             + snoise(vec3(aGridCoord * 0.25 + 50.0, t * 6.0)) * 1.5;
+  elevation += mouseInfluence * uMouseStrength * (turb + 1.5);
+
   pos.y += elevation;
 
   vElevation = elevation;
@@ -207,10 +220,13 @@ export default function createPurpleWaveField(container) {
     vertexShader,
     fragmentShader,
     uniforms: {
-      uTime:       { value: 0 },
-      uAmplitude:  { value: WAVE_AMPLITUDE },
-      uColorCore:  { value: new THREE.Vector3(coreColor.r,  coreColor.g,  coreColor.b) },
-      uColorCrest: { value: new THREE.Vector3(crestColor.r, crestColor.g, crestColor.b) },
+      uTime:          { value: 0 },
+      uAmplitude:     { value: WAVE_AMPLITUDE },
+      uColorCore:     { value: new THREE.Vector3(coreColor.r,  coreColor.g,  coreColor.b) },
+      uColorCrest:    { value: new THREE.Vector3(crestColor.r, crestColor.g, crestColor.b) },
+      uMouseWorld:    { value: new THREE.Vector3(0, 0, -9999) },
+      uMouseStrength: { value: 0 },
+      uMouseRadius:   { value: MOUSE_RADIUS },
     },
     transparent:  true,
     blending:     THREE.AdditiveBlending,
@@ -264,6 +280,41 @@ export default function createPurpleWaveField(container) {
   );
   observer.observe(container);
 
+  // ── Mouse / touch interaction ──────────────────────────────────────────────
+  const raycaster  = new THREE.Raycaster();
+  const mouseNDC   = new THREE.Vector2();
+  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const hitPoint   = new THREE.Vector3();
+
+  const mouse = {
+    world:    new THREE.Vector3(0, 0, -9999),
+    velocity: 0,
+    strength: 0,
+    active:   false,
+  };
+
+  function onPointerMove(px, py) {
+    const rect = container.getBoundingClientRect();
+    mouseNDC.x =  ((px - rect.left) / rect.width)  * 2 - 1;
+    mouseNDC.y = -((py - rect.top)  / rect.height) * 2 + 1;
+
+    raycaster.setFromCamera(mouseNDC, camera);
+    if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
+      if (mouse.active) {
+        mouse.velocity = hitPoint.distanceTo(mouse.world);
+      }
+      mouse.world.copy(hitPoint);
+      mouse.active = true;
+    }
+  }
+
+  container.addEventListener('mousemove', (e) => onPointerMove(e.clientX, e.clientY));
+  container.addEventListener('touchmove', (e) => {
+    if (e.touches.length) onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  container.addEventListener('mouseleave', () => { mouse.active = false; });
+  container.addEventListener('touchend',   () => { mouse.active = false; });
+
   // ── Animation loop ────────────────────────────────────────────────────────
   const clock = new THREE.Clock();
   let animId = null;
@@ -279,6 +330,14 @@ export default function createPurpleWaveField(container) {
     const speed = reducedMotion ? WAVE_SPEED * 0.05 : WAVE_SPEED;
     elapsed += delta * speed;
     material.uniforms.uTime.value = elapsed;
+
+    // ── Mouse strength: ramps with velocity, decays when still ──
+    const targetStr = Math.min(mouse.velocity * 0.3, MOUSE_STRENGTH);
+    mouse.strength += (targetStr - mouse.strength) * 0.15;
+    mouse.velocity *= 0.9;
+    if (!mouse.active) mouse.strength *= 0.92;
+    material.uniforms.uMouseWorld.value.copy(mouse.world);
+    material.uniforms.uMouseStrength.value = mouse.strength;
 
     // Subtle camera drift (lissajous)
     if (!reducedMotion) {
@@ -296,6 +355,8 @@ export default function createPurpleWaveField(container) {
   return function dispose() {
     cancelAnimationFrame(animId);
     window.removeEventListener('resize', onResize);
+    container.removeEventListener('mousemove', onPointerMove);
+    container.removeEventListener('touchmove', onPointerMove);
     observer.disconnect();
     geometry.dispose();
     material.dispose();
