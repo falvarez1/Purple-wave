@@ -19,8 +19,9 @@ const COLOR_CREST     = '#c4b5fd';  // bright lavender (crests)
 const BLOOM_STRENGTH  = 0.8;
 const BLOOM_RADIUS    = 0.6;
 const BLOOM_THRESHOLD = 0.0;
-const MOUSE_RADIUS    = 20.0;       // disturbance radius in world units
-const MOUSE_STRENGTH  = 1.0;        // max disturbance multiplier
+const MOUSE_RADIUS    = 20.0;       // magnetic pull radius in world units
+const MOUSE_PULL_MAX  = 6.0;        // max XZ pull distance per dot
+const MOUSE_LIFT      = 2.5;        // Y lift at cursor center
 const FOCUS_DISTANCE  = 50.0;       // depth of field — camera-space focus plane
 const DOF_STRENGTH    = 0.020;      // how aggressively out-of-focus dots blur
 const DOF_MAX_BLUR    = 2.5;        // cap on CoC growth
@@ -86,6 +87,8 @@ uniform float uAmplitude;
 uniform vec3  uMouseWorld;
 uniform float uMouseStrength;
 uniform float uMouseRadius;
+uniform float uMousePullMax;
+uniform float uMouseLift;
 uniform float uFocusDistance;
 uniform float uDofStrength;
 uniform float uDofMaxBlur;
@@ -116,15 +119,19 @@ void main(){
              * uAmplitude * 0.65;
 
   float elevation = n1 + n2 + n3 + sine;
-
-  // ── Mouse disturbance — high-freq turbulence near cursor ──
-  float mouseDist = length(aGridCoord - uMouseWorld.xz);
-  float mouseInfluence = smoothstep(uMouseRadius, 0.0, mouseDist);
-  float turb = snoise(vec3(aGridCoord * 0.12, t * 4.0)) * 2.5
-             + snoise(vec3(aGridCoord * 0.25 + 50.0, t * 6.0)) * 1.5;
-  elevation += mouseInfluence * uMouseStrength * (turb + 1.5);
-
   pos.y += elevation;
+
+  // ── Mouse magnet — pull dots toward cursor in XZ, breaking grid uniformity ──
+  vec2 toMouse = uMouseWorld.xz - aGridCoord;
+  float mouseDist = length(toMouse);
+  vec2 mouseDir = mouseDist > 0.001 ? toMouse / mouseDist : vec2(0.0);
+  // Quadratic falloff — strong near center, gentle at edge
+  float pull = smoothstep(uMouseRadius, 0.0, mouseDist);
+  pull *= pull;
+  float pullAmount = pull * uMouseStrength * uMousePullMax;
+  pos.xz += mouseDir * pullAmount;
+  // Lift dots near cursor so the clustering is visible from the low camera
+  pos.y += pull * uMouseStrength * uMouseLift;
 
   vElevation = elevation;
 
@@ -243,6 +250,8 @@ export default function createPurpleWaveField(container) {
       uMouseWorld:    { value: new THREE.Vector3(0, 0, -9999) },
       uMouseStrength: { value: 0 },
       uMouseRadius:   { value: MOUSE_RADIUS },
+      uMousePullMax:  { value: MOUSE_PULL_MAX },
+      uMouseLift:     { value: MOUSE_LIFT },
       uFocusDistance: { value: FOCUS_DISTANCE },
       uDofStrength:   { value: DOF_STRENGTH },
       uDofMaxBlur:    { value: DOF_MAX_BLUR },
@@ -350,11 +359,13 @@ export default function createPurpleWaveField(container) {
     elapsed += delta * speed;
     material.uniforms.uTime.value = elapsed;
 
-    // ── Mouse strength: ramps with velocity, decays when still ──
-    const targetStr = Math.min(mouse.velocity * 0.3, MOUSE_STRENGTH);
-    mouse.strength += (targetStr - mouse.strength) * 0.15;
-    mouse.velocity *= 0.9;
-    if (!mouse.active) mouse.strength *= 0.92;
+    // ── Mouse magnet strength: base pull on hover, boosted by speed ──
+    const basePull = mouse.active ? 0.45 : 0.0;
+    const velocityBoost = Math.min(mouse.velocity * 0.25, 0.55);
+    const targetStr = Math.min(basePull + velocityBoost, 1.0);
+    // Slow lerp ≈ damped spring: dots ease in and spring back
+    mouse.strength += (targetStr - mouse.strength) * 0.08;
+    mouse.velocity *= 0.92;
     material.uniforms.uMouseWorld.value.copy(mouse.world);
     material.uniforms.uMouseStrength.value = mouse.strength;
 
