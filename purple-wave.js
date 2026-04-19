@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // Purple Wave Field — Animated particle wave hero background
 // Self-contained Three.js ES-module. Mount into any container div.
+// Returns { state, dispose } — mutate state at runtime to control effects.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import * as THREE from 'three';
@@ -8,26 +9,12 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-// ─── Tunables ───────────────────────────────────────────────────────────────
-const POINT_COUNT_X   = 400;        // dots across
-const POINT_COUNT_Z   = 200;        // dots deep
-const SPACING         = 0.55;       // distance between dots in world units
-const WAVE_SPEED      = 0.15;       // time multiplier — lower = calmer
-const WAVE_AMPLITUDE  = 3.0;        // max vertical displacement
-const COLOR_CORE      = '#a855f7';  // deep violet (troughs)
-const COLOR_CREST     = '#c4b5fd';  // bright lavender (crests)
-const BLOOM_STRENGTH  = 0.8;
-const BLOOM_RADIUS    = 0.6;
-const BLOOM_THRESHOLD = 0.0;
-const MOUSE_RADIUS    = 20.0;       // magnetic pull radius in world units
-const MOUSE_PULL_MAX  = 6.0;        // max XZ pull distance per dot
-const MOUSE_LIFT      = 2.5;        // Y lift at cursor center
-const FOCUS_DISTANCE  = 50.0;       // depth of field — camera-space focus plane
-const DOF_STRENGTH    = 0.020;      // how aggressively out-of-focus dots blur
-const DOF_MAX_BLUR    = 2.5;        // cap on CoC growth
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Build-time constants (geometry — not runtime adjustable) ───────────────
+const POINT_COUNT_X = 400;
+const POINT_COUNT_Z = 200;
+const SPACING       = 0.55;
 
-// ─── GLSL: Ashima 3-D simplex noise ─────────────────────────────────────────
+// ─── GLSL: Ashima 3-D simplex noise ────────────────────────────────────────
 const SNOISE_GLSL = /* glsl */ `
 vec3 mod289(vec3 x){ return x - floor(x*(1.0/289.0))*289.0; }
 vec4 mod289(vec4 x){ return x - floor(x*(1.0/289.0))*289.0; }
@@ -78,7 +65,7 @@ float snoise(vec3 v){
 }
 `;
 
-// ─── Vertex Shader ──────────────────────────────────────────────────────────
+// ─── Vertex Shader ─────────────────────────────────────────────────────────
 const vertexShader = /* glsl */ `
 ${SNOISE_GLSL}
 
@@ -101,19 +88,15 @@ void main(){
   vec3 pos = position;
   float t = uTime;
 
-  // ── Layered noise → organic flowing-silk displacement ──
-  // Octave 1: broad, slow undulation (largest amplitude)
+  // Layered noise for organic flowing-silk displacement
   float n1 = snoise(vec3(aGridCoord * 0.015, t * 0.4)) * uAmplitude;
-  // Octave 2: medium ripple, offset & drifting at a different angle
   float n2 = snoise(vec3(aGridCoord.x * 0.04 + 97.0,
                          aGridCoord.y * 0.03 + 31.0,
                          t * 0.7)) * uAmplitude * 0.45;
-  // Octave 3: fine shimmer / texture
   float n3 = snoise(vec3(aGridCoord.x * 0.09 + 210.0,
                          aGridCoord.y * 0.07 + 140.0,
                          t * 1.1)) * uAmplitude * 0.2;
 
-  // ── Breathing sine ripple — whole sheet rises and falls ──
   float sine = sin(aGridCoord.x * 0.025 + t * 0.55)
              * cos(aGridCoord.y * 0.018 + t * 0.35)
              * uAmplitude * 0.65;
@@ -121,32 +104,28 @@ void main(){
   float elevation = n1 + n2 + n3 + sine;
   pos.y += elevation;
 
-  // ── Mouse magnet — pull dots toward cursor in XZ, breaking grid uniformity ──
+  // Mouse magnet — pull dots toward cursor in XZ
   vec2 toMouse = uMouseWorld.xz - aGridCoord;
   float mouseDist = length(toMouse);
   vec2 mouseDir = mouseDist > 0.001 ? toMouse / mouseDist : vec2(0.0);
-  // Quadratic falloff — strong near center, gentle at edge
   float pull = smoothstep(uMouseRadius, 0.0, mouseDist);
   pull *= pull;
-  float pullAmount = pull * uMouseStrength * uMousePullMax;
-  pos.xz += mouseDir * pullAmount;
-  // Lift dots near cursor so the clustering is visible from the low camera
-  pos.y += pull * uMouseStrength * uMouseLift;
+  pos.xz += mouseDir * pull * uMouseStrength * uMousePullMax;
+  pos.y  += pull * uMouseStrength * uMouseLift;
 
   vElevation = elevation;
 
   vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
   vDistance = -mvPosition.z;
 
-  // ── Depth of field — circle-of-confusion grows with |distance − focus| ──
+  // Depth of field — CoC grows with distance from focus plane
   float coc = clamp(abs(vDistance - uFocusDistance) * uDofStrength, 0.0, uDofMaxBlur);
   vCoc = coc;
 
-  // ── Point size: perspective-scaled + sparkle hash + DOF expansion ──
   float hash = fract(sin(dot(aGridCoord, vec2(12.9898, 78.233))) * 43758.5453);
   float baseSize = 2.8;
   float size = baseSize * (1.0 + hash * 0.35) * (220.0 / vDistance);
-  size *= (1.0 + coc);                 // bokeh: out-of-focus dots get larger
+  size *= (1.0 + coc);
   gl_PointSize = clamp(size, 0.5, 28.0);
 
   gl_Position = projectionMatrix * mvPosition;
@@ -155,34 +134,41 @@ void main(){
 
 // ─── Fragment Shader ────────────────────────────────────────────────────────
 const fragmentShader = /* glsl */ `
-uniform vec3 uColorCore;
-uniform vec3 uColorCrest;
+uniform vec3  uColorCore;
+uniform vec3  uColorCrest;
 uniform float uAmplitude;
+uniform float uHueShift;
 varying float vElevation;
 varying float vDistance;
 varying float vCoc;
 
+// Rodrigues rotation around the luminance axis — rotates hue
+vec3 hueRotate(vec3 c, float a){
+  float s = sin(a), co = cos(a);
+  vec3 k = vec3(0.57735);
+  return c * co + cross(k, c) * s + k * dot(k, c) * (1.0 - co);
+}
+
 void main(){
-  // ── Soft circular dot — edge softens with CoC for a bokeh feel ──
   float d = length(gl_PointCoord - 0.5);
   float innerEdge = mix(0.32, 0.0, clamp(vCoc * 0.6, 0.0, 0.95));
   float alpha = 1.0 - smoothstep(innerEdge, 0.5, d);
-  // Dim out-of-focus dots so the additive stack doesn't over-brighten
   alpha /= (1.0 + vCoc * 0.9);
 
-  // ── Color: violet (troughs) → lavender (crests) ──
   float elevNorm = smoothstep(-uAmplitude * 1.2, uAmplitude * 1.4, vElevation);
   vec3 color = mix(uColorCore, uColorCrest, elevNorm);
 
-  // Brightness: crests glow brightly, troughs nearly vanish
   float brightness = smoothstep(-uAmplitude * 1.8, uAmplitude * 0.6, vElevation);
   brightness = max(brightness, 0.06);
   color *= brightness;
 
-  // ── Distance fade — far dots dissolve to black ──
+  // Color pulse — hue rotation
+  if (abs(uHueShift) > 0.001) {
+    color = hueRotate(color, uHueShift);
+  }
+
   float distFade = 1.0 - smoothstep(35.0, 240.0, vDistance);
   alpha *= distFade;
-  // Near fade — avoid harsh pop at camera
   alpha *= smoothstep(3.0, 14.0, vDistance);
 
   gl_FragColor = vec4(color, alpha);
@@ -193,6 +179,24 @@ void main(){
 export default function createPurpleWaveField(container) {
   if (!container) throw new Error('createPurpleWaveField: container element required');
 
+  // ── Mutable runtime state — mutate freely, animation loop reads each frame ──
+  const state = {
+    bloom:          true,
+    bloomStrength:  0.8,
+    dof:            true,
+    focusDistance:   50.0,
+    dofStrength:    0.020,
+    waves:          true,
+    waveSpeed:      0.15,
+    waveAmplitude:  3.0,
+    mouse:          true,
+    mouseRadius:    20.0,
+    mousePullMax:   6.0,
+    cameraDrift:    true,
+    colorPulse:     false,
+    colorPulseSpeed: 0.3,
+  };
+
   // ── Renderer ──────────────────────────────────────────────────────────────
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -201,9 +205,7 @@ export default function createPurpleWaveField(container) {
 
   // ── Scene & Camera ────────────────────────────────────────────────────────
   const scene = new THREE.Scene();
-
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500);
-  // Low vantage, looking across the surface toward the horizon
   const camBase = new THREE.Vector3(0, 18, -25);
   camera.position.copy(camBase);
   camera.lookAt(0, 0, 55);
@@ -212,7 +214,6 @@ export default function createPurpleWaveField(container) {
   const count = POINT_COUNT_X * POINT_COUNT_Z;
   const positions  = new Float32Array(count * 3);
   const gridCoords = new Float32Array(count * 2);
-
   const halfX = (POINT_COUNT_X - 1) * SPACING * 0.5;
   const halfZ = (POINT_COUNT_Z - 1) * SPACING * 0.5;
 
@@ -220,14 +221,10 @@ export default function createPurpleWaveField(container) {
   for (let iz = 0; iz < POINT_COUNT_Z; iz++) {
     for (let ix = 0; ix < POINT_COUNT_X; ix++) {
       const x = ix * SPACING - halfX;
-      const z = iz * SPACING - halfZ + 30; // offset so field stretches ahead
-      positions[idx3]     = x;
-      positions[idx3 + 1] = 0;
-      positions[idx3 + 2] = z;
-      gridCoords[idx2]     = x;
-      gridCoords[idx2 + 1] = z;
-      idx3 += 3;
-      idx2 += 2;
+      const z = iz * SPACING - halfZ + 30;
+      positions[idx3] = x; positions[idx3+1] = 0; positions[idx3+2] = z;
+      gridCoords[idx2] = x; gridCoords[idx2+1] = z;
+      idx3 += 3; idx2 += 2;
     }
   }
 
@@ -236,29 +233,30 @@ export default function createPurpleWaveField(container) {
   geometry.setAttribute('aGridCoord', new THREE.BufferAttribute(gridCoords, 2));
 
   // ── Shader material ──────────────────────────────────────────────────────
-  const coreColor  = new THREE.Color(COLOR_CORE);
-  const crestColor = new THREE.Color(COLOR_CREST);
+  const coreColor  = new THREE.Color('#a855f7');
+  const crestColor = new THREE.Color('#c4b5fd');
 
   const material = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
     uniforms: {
       uTime:          { value: 0 },
-      uAmplitude:     { value: WAVE_AMPLITUDE },
+      uAmplitude:     { value: state.waveAmplitude },
       uColorCore:     { value: new THREE.Vector3(coreColor.r,  coreColor.g,  coreColor.b) },
       uColorCrest:    { value: new THREE.Vector3(crestColor.r, crestColor.g, crestColor.b) },
       uMouseWorld:    { value: new THREE.Vector3(0, 0, -9999) },
       uMouseStrength: { value: 0 },
-      uMouseRadius:   { value: MOUSE_RADIUS },
-      uMousePullMax:  { value: MOUSE_PULL_MAX },
-      uMouseLift:     { value: MOUSE_LIFT },
-      uFocusDistance: { value: FOCUS_DISTANCE },
-      uDofStrength:   { value: DOF_STRENGTH },
-      uDofMaxBlur:    { value: DOF_MAX_BLUR },
+      uMouseRadius:   { value: state.mouseRadius },
+      uMousePullMax:  { value: state.mousePullMax },
+      uMouseLift:     { value: 2.5 },
+      uFocusDistance:  { value: state.focusDistance },
+      uDofStrength:   { value: state.dofStrength },
+      uDofMaxBlur:    { value: 2.5 },
+      uHueShift:      { value: 0 },
     },
-    transparent:  true,
-    blending:     THREE.AdditiveBlending,
-    depthWrite:   false,
+    transparent: true,
+    blending:    THREE.AdditiveBlending,
+    depthWrite:  false,
   });
 
   const points = new THREE.Points(geometry, material);
@@ -267,19 +265,15 @@ export default function createPurpleWaveField(container) {
   // ── Post-processing: bloom ────────────────────────────────────────────────
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-
   const bloom = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    BLOOM_STRENGTH,
-    BLOOM_RADIUS,
-    BLOOM_THRESHOLD
+    state.bloomStrength, 0.6, 0.0
   );
   composer.addPass(bloom);
 
-  // ── Resize handling ───────────────────────────────────────────────────────
+  // ── Resize ────────────────────────────────────────────────────────────────
   function onResize() {
-    const w = container.clientWidth;
-    const h = container.clientHeight;
+    const w = container.clientWidth, h = container.clientHeight;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
@@ -289,48 +283,37 @@ export default function createPurpleWaveField(container) {
   window.addEventListener('resize', onResize);
   onResize();
 
-  // ── Reduced-motion preference ─────────────────────────────────────────────
+  // ── Reduced-motion ────────────────────────────────────────────────────────
   const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   let reducedMotion = motionQuery.matches;
   motionQuery.addEventListener('change', (e) => { reducedMotion = e.matches; });
 
-  // ── Visibility: pause when hidden / off-screen ────────────────────────────
-  let visible = true;
-  let onScreen = true;
-
-  document.addEventListener('visibilitychange', () => {
-    visible = !document.hidden;
-  });
-
+  // ── Visibility ────────────────────────────────────────────────────────────
+  let visible = true, onScreen = true;
+  document.addEventListener('visibilitychange', () => { visible = !document.hidden; });
   const observer = new IntersectionObserver(
-    ([entry]) => { onScreen = entry.isIntersecting; },
-    { threshold: 0 }
+    ([e]) => { onScreen = e.isIntersecting; }, { threshold: 0 }
   );
   observer.observe(container);
 
-  // ── Mouse / touch interaction ──────────────────────────────────────────────
-  const raycaster  = new THREE.Raycaster();
-  const mouseNDC   = new THREE.Vector2();
+  // ── Mouse / touch ─────────────────────────────────────────────────────────
+  const raycaster   = new THREE.Raycaster();
+  const mouseNDC    = new THREE.Vector2();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  const hitPoint   = new THREE.Vector3();
+  const hitPoint    = new THREE.Vector3();
 
   const mouse = {
-    world:    new THREE.Vector3(0, 0, -9999),
-    velocity: 0,
-    strength: 0,
-    active:   false,
+    world: new THREE.Vector3(0, 0, -9999),
+    velocity: 0, strength: 0, active: false,
   };
 
   function onPointerMove(px, py) {
     const rect = container.getBoundingClientRect();
     mouseNDC.x =  ((px - rect.left) / rect.width)  * 2 - 1;
     mouseNDC.y = -((py - rect.top)  / rect.height) * 2 + 1;
-
     raycaster.setFromCamera(mouseNDC, camera);
     if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
-      if (mouse.active) {
-        mouse.velocity = hitPoint.distanceTo(mouse.world);
-      }
+      if (mouse.active) mouse.velocity = hitPoint.distanceTo(mouse.world);
       mouse.world.copy(hitPoint);
       mouse.active = true;
     }
@@ -345,33 +328,52 @@ export default function createPurpleWaveField(container) {
 
   // ── Animation loop ────────────────────────────────────────────────────────
   const clock = new THREE.Clock();
-  let animId = null;
-  let elapsed = 0;
+  let animId = null, elapsed = 0, hueShift = 0;
 
   function animate() {
     animId = requestAnimationFrame(animate);
-
     if (!visible || !onScreen) return;
 
     const delta = clock.getDelta();
-    // Freeze or drastically slow time when reduced-motion is preferred
-    const speed = reducedMotion ? WAVE_SPEED * 0.05 : WAVE_SPEED;
+    const speed = reducedMotion ? state.waveSpeed * 0.05 : state.waveSpeed;
     elapsed += delta * speed;
-    material.uniforms.uTime.value = elapsed;
 
-    // ── Mouse magnet strength: base pull on hover, boosted by speed ──
-    const basePull = mouse.active ? 0.45 : 0.0;
-    const velocityBoost = Math.min(mouse.velocity * 0.25, 0.55);
-    const targetStr = Math.min(basePull + velocityBoost, 1.0);
-    // Slow lerp ≈ damped spring: dots ease in and spring back
-    mouse.strength += (targetStr - mouse.strength) * 0.08;
-    mouse.velocity *= 0.92;
+    // ── Apply state to uniforms ──
+    material.uniforms.uTime.value = elapsed;
+    material.uniforms.uAmplitude.value  = state.waves ? state.waveAmplitude : 0;
+    material.uniforms.uMouseRadius.value  = state.mouseRadius;
+    material.uniforms.uMousePullMax.value = state.mouse ? state.mousePullMax : 0;
+    material.uniforms.uDofStrength.value  = state.dof ? state.dofStrength : 0;
+    material.uniforms.uFocusDistance.value = state.focusDistance;
+    bloom.strength = state.bloom ? state.bloomStrength : 0;
+
+    // Color pulse
+    if (state.colorPulse) {
+      hueShift += delta * state.colorPulseSpeed;
+    } else {
+      const target = Math.round(hueShift / (Math.PI * 2)) * Math.PI * 2;
+      hueShift += (target - hueShift) * 0.04;
+      if (Math.abs(hueShift) < 0.01) hueShift = 0;
+    }
+    material.uniforms.uHueShift.value = hueShift;
+
+    // Mouse magnet strength
+    if (state.mouse) {
+      const basePull = mouse.active ? 0.45 : 0.0;
+      const boost    = Math.min(mouse.velocity * 0.25, 0.55);
+      const target   = Math.min(basePull + boost, 1.0);
+      mouse.strength += (target - mouse.strength) * 0.08;
+      mouse.velocity *= 0.92;
+    } else {
+      mouse.strength *= 0.9;
+      mouse.velocity = 0;
+    }
     material.uniforms.uMouseWorld.value.copy(mouse.world);
     material.uniforms.uMouseStrength.value = mouse.strength;
 
-    // Subtle camera drift (lissajous)
-    if (!reducedMotion) {
-      camera.position.x = camBase.x + Math.sin(elapsed * 0.6)  * 0.8;
+    // Camera drift
+    if (state.cameraDrift && !reducedMotion) {
+      camera.position.x = camBase.x + Math.sin(elapsed * 0.6) * 0.8;
       camera.position.y = camBase.y + Math.cos(elapsed * 0.45) * 0.4;
       camera.lookAt(0, 0, 55);
     }
@@ -381,17 +383,17 @@ export default function createPurpleWaveField(container) {
 
   animate();
 
-  // ── Cleanup function ──────────────────────────────────────────────────────
-  return function dispose() {
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+  function dispose() {
     cancelAnimationFrame(animId);
     window.removeEventListener('resize', onResize);
-    container.removeEventListener('mousemove', onPointerMove);
-    container.removeEventListener('touchmove', onPointerMove);
     observer.disconnect();
     geometry.dispose();
     material.dispose();
     renderer.dispose();
     composer.dispose();
     container.removeChild(renderer.domElement);
-  };
+  }
+
+  return { state, dispose };
 }

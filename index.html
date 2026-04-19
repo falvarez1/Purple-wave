@@ -6,13 +6,254 @@
   <title>Purple Wave Field</title>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000;
+                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
     #container { width: 100%; height: 100%; }
+
+    /* ── Panel shell ─────────────────────────────────────────────────── */
+    #panel {
+      position: fixed; right: 0; top: 0; height: 100%;
+      width: 290px; z-index: 100;
+      transform: translateX(100%);
+      transition: transform .35s cubic-bezier(.4,0,.2,1);
+    }
+    #panel.open { transform: translateX(0); }
+
+    #panel-toggle {
+      position: absolute; left: -48px; top: 16px;
+      width: 40px; height: 40px; border: none; border-radius: 10px;
+      background: rgba(10,0,25,.75); backdrop-filter: blur(8px);
+      border: 1px solid rgba(168,85,247,.35);
+      color: #c4b5fd; font-size: 20px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .2s, border-color .2s;
+    }
+    #panel-toggle:hover { background: rgba(168,85,247,.2); border-color: rgba(168,85,247,.6); }
+
+    .panel-body {
+      height: 100%; overflow-y: auto; padding: 20px 18px 30px;
+      background: rgba(8,0,20,.88); backdrop-filter: blur(14px);
+      border-left: 1px solid rgba(168,85,247,.25);
+      scrollbar-width: thin; scrollbar-color: rgba(168,85,247,.3) transparent;
+    }
+
+    .panel-body h2 {
+      font-size: 13px; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase; color: #a78bfa; margin-bottom: 16px;
+    }
+
+    /* ── Preset dropdown ─────────────────────────────────────────────── */
+    .preset-row { margin-bottom: 18px; }
+    .preset-row label { display: block; font-size: 11px; color: #8b7faa; margin-bottom: 5px;
+                        text-transform: uppercase; letter-spacing: .06em; }
+    .preset-row select {
+      width: 100%; padding: 7px 10px; border-radius: 6px;
+      background: rgba(255,255,255,.05); color: #d4c0ff;
+      border: 1px solid rgba(168,85,247,.3); font-size: 13px;
+      outline: none; cursor: pointer;
+      transition: border-color .2s;
+    }
+    .preset-row select:hover { border-color: rgba(168,85,247,.6); }
+    .preset-row select option { background: #1a0830; color: #d4c0ff; }
+
+    /* ── Control group ───────────────────────────────────────────────── */
+    .ctrl {
+      margin-bottom: 14px; padding: 12px; border-radius: 8px;
+      background: rgba(255,255,255,.025);
+      border: 1px solid rgba(168,85,247,.1);
+      transition: opacity .25s;
+    }
+    .ctrl.off .sliders { opacity: .25; pointer-events: none; }
+
+    /* ── Toggle row ──────────────────────────────────────────────────── */
+    .toggle-row {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .toggle-row span {
+      font-size: 13px; font-weight: 500; color: #ddd6fe;
+    }
+
+    /* Custom switch */
+    .sw { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+    .sw input { display: none; }
+    .sw .track {
+      position: absolute; inset: 0; border-radius: 10px; cursor: pointer;
+      background: rgba(255,255,255,.1); transition: background .25s, box-shadow .25s;
+    }
+    .sw input:checked + .track {
+      background: #a855f7;
+      box-shadow: 0 0 10px rgba(168,85,247,.45);
+    }
+    .sw .track::after {
+      content: ''; position: absolute;
+      width: 16px; height: 16px; left: 2px; top: 2px;
+      border-radius: 50%; background: #fff;
+      transition: transform .25s cubic-bezier(.4,0,.2,1);
+    }
+    .sw input:checked + .track::after { transform: translateX(16px); }
+
+    /* ── Slider rows ─────────────────────────────────────────────────── */
+    .sliders { margin-top: 10px; }
+    .slider-row {
+      display: flex; align-items: center; gap: 8px; margin-top: 6px;
+    }
+    .slider-row label {
+      font-size: 11px; color: #8b7faa; min-width: 62px;
+    }
+    .slider-row input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      flex: 1; height: 4px; border-radius: 2px;
+      background: rgba(255,255,255,.08); outline: none;
+    }
+    .slider-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #a855f7; cursor: pointer;
+      box-shadow: 0 0 6px rgba(168,85,247,.5);
+    }
+    .slider-row input[type="range"]::-moz-range-thumb {
+      width: 14px; height: 14px; border-radius: 50%; border: none;
+      background: #a855f7; cursor: pointer;
+      box-shadow: 0 0 6px rgba(168,85,247,.5);
+    }
+    .slider-row .val {
+      font-size: 11px; color: #a78bfa; min-width: 32px; text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Divider ─────────────────────────────────────────────────────── */
+    .divider {
+      height: 1px; margin: 16px 0;
+      background: linear-gradient(90deg, transparent, rgba(168,85,247,.25), transparent);
+    }
   </style>
 </head>
 <body>
   <div id="container"></div>
 
+  <!-- ═══ Effects Panel ═══════════════════════════════════════════════════ -->
+  <div id="panel">
+    <button id="panel-toggle" title="Toggle effects panel">&#9881;</button>
+    <div class="panel-body">
+      <h2>Effects</h2>
+
+      <!-- Preset -->
+      <div class="preset-row">
+        <label>Preset</label>
+        <select id="preset">
+          <option value="silk-flow">Silk Flow</option>
+          <option value="calm-ocean">Calm Ocean</option>
+          <option value="electric-storm">Electric Storm</option>
+          <option value="deep-space">Deep Space</option>
+          <option value="neon-grid">Neon Grid</option>
+          <option value="zen-garden">Zen Garden</option>
+          <option value="supernova">Supernova</option>
+        </select>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Bloom -->
+      <div class="ctrl" data-key="bloom">
+        <div class="toggle-row">
+          <span>Bloom Glow</span>
+          <label class="sw"><input type="checkbox" data-toggle="bloom" checked><span class="track"></span></label>
+        </div>
+        <div class="sliders">
+          <div class="slider-row">
+            <label>Strength</label>
+            <input type="range" data-slider="bloomStrength" min="0" max="3" step="0.1" value="0.8">
+            <span class="val">0.8</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Depth of Field -->
+      <div class="ctrl" data-key="dof">
+        <div class="toggle-row">
+          <span>Depth of Field</span>
+          <label class="sw"><input type="checkbox" data-toggle="dof" checked><span class="track"></span></label>
+        </div>
+        <div class="sliders">
+          <div class="slider-row">
+            <label>Focus</label>
+            <input type="range" data-slider="focusDistance" min="10" max="120" step="1" value="50">
+            <span class="val">50</span>
+          </div>
+          <div class="slider-row">
+            <label>Blur</label>
+            <input type="range" data-slider="dofStrength" min="0" max="0.06" step="0.001" value="0.020">
+            <span class="val">0.020</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Wave Motion -->
+      <div class="ctrl" data-key="waves">
+        <div class="toggle-row">
+          <span>Wave Motion</span>
+          <label class="sw"><input type="checkbox" data-toggle="waves" checked><span class="track"></span></label>
+        </div>
+        <div class="sliders">
+          <div class="slider-row">
+            <label>Speed</label>
+            <input type="range" data-slider="waveSpeed" min="0.01" max="0.5" step="0.01" value="0.15">
+            <span class="val">0.15</span>
+          </div>
+          <div class="slider-row">
+            <label>Amplitude</label>
+            <input type="range" data-slider="waveAmplitude" min="0.5" max="8" step="0.1" value="3.0">
+            <span class="val">3.0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mouse Magnet -->
+      <div class="ctrl" data-key="mouse">
+        <div class="toggle-row">
+          <span>Mouse Magnet</span>
+          <label class="sw"><input type="checkbox" data-toggle="mouse" checked><span class="track"></span></label>
+        </div>
+        <div class="sliders">
+          <div class="slider-row">
+            <label>Radius</label>
+            <input type="range" data-slider="mouseRadius" min="5" max="50" step="1" value="20">
+            <span class="val">20</span>
+          </div>
+          <div class="slider-row">
+            <label>Pull</label>
+            <input type="range" data-slider="mousePullMax" min="1" max="15" step="0.5" value="6.0">
+            <span class="val">6.0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Camera Drift -->
+      <div class="ctrl" data-key="cameraDrift">
+        <div class="toggle-row">
+          <span>Camera Drift</span>
+          <label class="sw"><input type="checkbox" data-toggle="cameraDrift" checked><span class="track"></span></label>
+        </div>
+      </div>
+
+      <!-- Color Pulse -->
+      <div class="ctrl" data-key="colorPulse">
+        <div class="toggle-row">
+          <span>Color Pulse</span>
+          <label class="sw"><input type="checkbox" data-toggle="colorPulse"><span class="track"></span></label>
+        </div>
+        <div class="sliders">
+          <div class="slider-row">
+            <label>Speed</label>
+            <input type="range" data-slider="colorPulseSpeed" min="0.05" max="1.5" step="0.05" value="0.30">
+            <span class="val">0.30</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Scripts ═════════════════════════════════════════════════════════ -->
   <script type="importmap">
   {
     "imports": {
@@ -24,7 +265,126 @@
 
   <script type="module">
     import createPurpleWaveField from './purple-wave.js';
-    createPurpleWaveField(document.getElementById('container'));
+
+    const { state } = createPurpleWaveField(document.getElementById('container'));
+
+    // ── Presets ──────────────────────────────────────────────────────────────
+    const PRESETS = {
+      'silk-flow': {
+        bloom: true, bloomStrength: 0.8,
+        dof: true, focusDistance: 50, dofStrength: 0.020,
+        waves: true, waveSpeed: 0.15, waveAmplitude: 3.0,
+        mouse: true, mouseRadius: 20, mousePullMax: 6.0,
+        cameraDrift: true,
+        colorPulse: false, colorPulseSpeed: 0.3,
+      },
+      'calm-ocean': {
+        bloom: true, bloomStrength: 0.5,
+        dof: true, focusDistance: 35, dofStrength: 0.035,
+        waves: true, waveSpeed: 0.07, waveAmplitude: 2.0,
+        mouse: true, mouseRadius: 30, mousePullMax: 3.0,
+        cameraDrift: true,
+        colorPulse: false, colorPulseSpeed: 0.1,
+      },
+      'electric-storm': {
+        bloom: true, bloomStrength: 1.8,
+        dof: true, focusDistance: 45, dofStrength: 0.012,
+        waves: true, waveSpeed: 0.38, waveAmplitude: 5.5,
+        mouse: true, mouseRadius: 12, mousePullMax: 12.0,
+        cameraDrift: true,
+        colorPulse: false, colorPulseSpeed: 0.3,
+      },
+      'deep-space': {
+        bloom: true, bloomStrength: 0.6,
+        dof: true, focusDistance: 65, dofStrength: 0.04,
+        waves: true, waveSpeed: 0.05, waveAmplitude: 1.5,
+        mouse: true, mouseRadius: 25, mousePullMax: 4.0,
+        cameraDrift: true,
+        colorPulse: true, colorPulseSpeed: 0.15,
+      },
+      'neon-grid': {
+        bloom: true, bloomStrength: 1.6,
+        dof: false, focusDistance: 50, dofStrength: 0.0,
+        waves: false, waveSpeed: 0.15, waveAmplitude: 0.0,
+        mouse: true, mouseRadius: 15, mousePullMax: 9.0,
+        cameraDrift: false,
+        colorPulse: true, colorPulseSpeed: 0.5,
+      },
+      'zen-garden': {
+        bloom: false, bloomStrength: 0.0,
+        dof: true, focusDistance: 55, dofStrength: 0.025,
+        waves: true, waveSpeed: 0.04, waveAmplitude: 1.2,
+        mouse: false, mouseRadius: 20, mousePullMax: 0.0,
+        cameraDrift: true,
+        colorPulse: false, colorPulseSpeed: 0.1,
+      },
+      'supernova': {
+        bloom: true, bloomStrength: 2.5,
+        dof: true, focusDistance: 40, dofStrength: 0.01,
+        waves: true, waveSpeed: 0.42, waveAmplitude: 6.5,
+        mouse: true, mouseRadius: 28, mousePullMax: 14.0,
+        cameraDrift: true,
+        colorPulse: true, colorPulseSpeed: 0.8,
+      },
+    };
+
+    // ── Panel toggle ────────────────────────────────────────────────────────
+    const panel   = document.getElementById('panel');
+    const toggleBtn = document.getElementById('panel-toggle');
+    toggleBtn.addEventListener('click', () => panel.classList.toggle('open'));
+
+    // ── Sync UI from state ──────────────────────────────────────────────────
+    function syncUI() {
+      document.querySelectorAll('[data-toggle]').forEach(el => {
+        const key = el.dataset.toggle;
+        el.checked = state[key];
+        el.closest('.ctrl').classList.toggle('off', !state[key]);
+      });
+      document.querySelectorAll('[data-slider]').forEach(el => {
+        const key = el.dataset.slider;
+        el.value = state[key];
+        el.nextElementSibling.textContent =
+          Number(state[key]) < 1 && String(state[key]).includes('.')
+            ? Number(state[key]).toFixed(3)
+            : Number(state[key]).toFixed(Number(state[key]) % 1 ? 1 : 0);
+      });
+    }
+
+    function formatVal(v) {
+      const n = Number(v);
+      if (n === 0) return '0';
+      if (Math.abs(n) < 0.1) return n.toFixed(3);
+      if (n % 1 === 0) return n.toFixed(0);
+      return n.toFixed(n < 10 ? 2 : 1);
+    }
+
+    // ── Wire toggles ────────────────────────────────────────────────────────
+    document.querySelectorAll('[data-toggle]').forEach(el => {
+      el.addEventListener('change', () => {
+        state[el.dataset.toggle] = el.checked;
+        el.closest('.ctrl').classList.toggle('off', !el.checked);
+      });
+    });
+
+    // ── Wire sliders ────────────────────────────────────────────────────────
+    document.querySelectorAll('[data-slider]').forEach(el => {
+      el.addEventListener('input', () => {
+        state[el.dataset.slider] = parseFloat(el.value);
+        el.nextElementSibling.textContent = formatVal(el.value);
+      });
+    });
+
+    // ── Wire preset dropdown ────────────────────────────────────────────────
+    const presetSelect = document.getElementById('preset');
+    presetSelect.addEventListener('change', () => {
+      const p = PRESETS[presetSelect.value];
+      if (!p) return;
+      Object.assign(state, p);
+      syncUI();
+    });
+
+    // Initial sync
+    syncUI();
   </script>
 </body>
 </html>
