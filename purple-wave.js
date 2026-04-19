@@ -21,6 +21,9 @@ const BLOOM_RADIUS    = 0.6;
 const BLOOM_THRESHOLD = 0.0;
 const MOUSE_RADIUS    = 20.0;       // disturbance radius in world units
 const MOUSE_STRENGTH  = 1.0;        // max disturbance multiplier
+const FOCUS_DISTANCE  = 50.0;       // depth of field — camera-space focus plane
+const DOF_STRENGTH    = 0.020;      // how aggressively out-of-focus dots blur
+const DOF_MAX_BLUR    = 2.5;        // cap on CoC growth
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── GLSL: Ashima 3-D simplex noise ─────────────────────────────────────────
@@ -83,9 +86,13 @@ uniform float uAmplitude;
 uniform vec3  uMouseWorld;
 uniform float uMouseStrength;
 uniform float uMouseRadius;
+uniform float uFocusDistance;
+uniform float uDofStrength;
+uniform float uDofMaxBlur;
 attribute vec2 aGridCoord;
 varying float vElevation;
 varying float vDistance;
+varying float vCoc;
 
 void main(){
   vec3 pos = position;
@@ -124,11 +131,16 @@ void main(){
   vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
   vDistance = -mvPosition.z;
 
-  // ── Point size: perspective-scaled + per-vertex sparkle hash ──
+  // ── Depth of field — circle-of-confusion grows with |distance − focus| ──
+  float coc = clamp(abs(vDistance - uFocusDistance) * uDofStrength, 0.0, uDofMaxBlur);
+  vCoc = coc;
+
+  // ── Point size: perspective-scaled + sparkle hash + DOF expansion ──
   float hash = fract(sin(dot(aGridCoord, vec2(12.9898, 78.233))) * 43758.5453);
   float baseSize = 2.8;
-  gl_PointSize = baseSize * (1.0 + hash * 0.35) * (220.0 / vDistance);
-  gl_PointSize = clamp(gl_PointSize, 0.5, 14.0);
+  float size = baseSize * (1.0 + hash * 0.35) * (220.0 / vDistance);
+  size *= (1.0 + coc);                 // bokeh: out-of-focus dots get larger
+  gl_PointSize = clamp(size, 0.5, 28.0);
 
   gl_Position = projectionMatrix * mvPosition;
 }
@@ -141,11 +153,15 @@ uniform vec3 uColorCrest;
 uniform float uAmplitude;
 varying float vElevation;
 varying float vDistance;
+varying float vCoc;
 
 void main(){
-  // ── Soft circular dot ──
+  // ── Soft circular dot — edge softens with CoC for a bokeh feel ──
   float d = length(gl_PointCoord - 0.5);
-  float alpha = 1.0 - smoothstep(0.32, 0.5, d);
+  float innerEdge = mix(0.32, 0.0, clamp(vCoc * 0.6, 0.0, 0.95));
+  float alpha = 1.0 - smoothstep(innerEdge, 0.5, d);
+  // Dim out-of-focus dots so the additive stack doesn't over-brighten
+  alpha /= (1.0 + vCoc * 0.9);
 
   // ── Color: violet (troughs) → lavender (crests) ──
   float elevNorm = smoothstep(-uAmplitude * 1.2, uAmplitude * 1.4, vElevation);
@@ -227,6 +243,9 @@ export default function createPurpleWaveField(container) {
       uMouseWorld:    { value: new THREE.Vector3(0, 0, -9999) },
       uMouseStrength: { value: 0 },
       uMouseRadius:   { value: MOUSE_RADIUS },
+      uFocusDistance: { value: FOCUS_DISTANCE },
+      uDofStrength:   { value: DOF_STRENGTH },
+      uDofMaxBlur:    { value: DOF_MAX_BLUR },
     },
     transparent:  true,
     blending:     THREE.AdditiveBlending,
