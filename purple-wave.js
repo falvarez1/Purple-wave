@@ -13,6 +13,8 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 const POINT_COUNT_X = 400;
 const POINT_COUNT_Z = 200;
 const SPACING       = 0.55;
+const MAX_RIPPLES   = 5;       // concurrent click shockwaves
+const RIPPLE_LIFE   = 5.0;     // seconds before a ripple is recycled
 
 // ─── GLSL: Ashima 3-D simplex noise ────────────────────────────────────────
 const SNOISE_GLSL = /* glsl */ `
@@ -69,7 +71,8 @@ float snoise(vec3 v){
 const vertexShader = /* glsl */ `
 ${SNOISE_GLSL}
 
-uniform float uTime;
+uniform float uTime;          // wave-speed-scaled time (drives slow motion)
+uniform float uRealTime;      // wall-clock time (drives ripples & sparkle)
 uniform float uAmplitude;
 uniform vec3  uMouseWorld;
 uniform float uMouseStrength;
@@ -79,10 +82,17 @@ uniform float uMouseLift;
 uniform float uFocusDistance;
 uniform float uDofStrength;
 uniform float uDofMaxBlur;
+uniform float uSparkle;       // 0 = off; twinkle brightness modulation
+uniform float uAurora;        // 0 = off; per-dot hue drift amount
+uniform float uRippleStrength;
+uniform vec4  uRipples[${MAX_RIPPLES}];   // xy = origin (grid coords), z = birth time
+uniform int   uRippleCount;
 attribute vec2 aGridCoord;
 varying float vElevation;
 varying float vDistance;
 varying float vCoc;
+varying float vSparkle;
+varying float vAurora;
 
 void main(){
   vec3 pos = position;
@@ -102,6 +112,19 @@ void main(){
              * uAmplitude * 0.65;
 
   float elevation = n1 + n2 + n3 + sine;
+
+  // Click shockwaves — expanding gaussian rings that decay over time.
+  // Elevation contribution also brightens the ring (vElevation drives color).
+  for (int i = 0; i < ${MAX_RIPPLES}; i++) {
+    if (i >= uRippleCount) break;
+    float age = uRealTime - uRipples[i].z;
+    float radius = age * 22.0;                       // ring expansion speed
+    float dist = distance(aGridCoord, uRipples[i].xy);
+    float band = exp(-pow((dist - radius) * 0.35, 2.0));
+    float decay = exp(-age * 1.1);
+    elevation += band * decay * uRippleStrength * 3.5;
+  }
+
   pos.y += elevation;
 
   // Mouse magnet — pull dots toward cursor in XZ
@@ -115,6 +138,19 @@ void main(){
 
   vElevation = elevation;
 
+  // Per-dot hash reused for size jitter and sparkle phase
+  float hash = fract(sin(dot(aGridCoord, vec2(12.9898, 78.233))) * 43758.5453);
+
+  // Sparkle — sharp twinkle pops (tw^4 spends most time near 0, spikes to 1)
+  float tw = sin(uRealTime * (2.0 + hash * 5.0) + hash * 39.7);
+  tw = tw * tw; tw = tw * tw;
+  vSparkle = 1.0 + uSparkle * (tw * 1.8 - 0.3);
+
+  // Aurora — slow spatial hue drift, rotated in the fragment shader
+  vAurora = uAurora > 0.001
+    ? snoise(vec3(aGridCoord * 0.018 + 7.3, t * 0.5)) * uAurora * 2.6
+    : 0.0;
+
   vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
   vDistance = -mvPosition.z;
 
@@ -122,7 +158,6 @@ void main(){
   float coc = clamp(abs(vDistance - uFocusDistance) * uDofStrength, 0.0, uDofMaxBlur);
   vCoc = coc;
 
-  float hash = fract(sin(dot(aGridCoord, vec2(12.9898, 78.233))) * 43758.5453);
   float baseSize = 2.8;
   float size = baseSize * (1.0 + hash * 0.35) * (220.0 / vDistance);
   size *= (1.0 + coc);
@@ -138,9 +173,14 @@ uniform vec3  uColorCore;
 uniform vec3  uColorCrest;
 uniform float uAmplitude;
 uniform float uHueShift;
+uniform float uExposure;
+uniform float uVignette;
+uniform vec2  uResolution;
 varying float vElevation;
 varying float vDistance;
 varying float vCoc;
+varying float vSparkle;
+varying float vAurora;
 
 // Rodrigues rotation around the luminance axis — rotates hue
 vec3 hueRotate(vec3 c, float a){
@@ -162,14 +202,23 @@ void main(){
   brightness = max(brightness, 0.06);
   color *= brightness;
 
-  // Color pulse — hue rotation
-  if (abs(uHueShift) > 0.001) {
-    color = hueRotate(color, uHueShift);
-  }
+  // Sparkle twinkle + global exposure
+  color *= vSparkle * uExposure;
+
+  // Color pulse (global hue cycle) + aurora (per-dot spatial hue drift)
+  float hue = uHueShift + vAurora;
+  if (abs(hue) > 0.001) color = hueRotate(color, hue);
 
   float distFade = 1.0 - smoothstep(35.0, 240.0, vDistance);
   alpha *= distFade;
   alpha *= smoothstep(3.0, 14.0, vDistance);
+
+  // Vignette — darken dots toward screen edges (background is already black)
+  if (uVignette > 0.001) {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    float vig = 1.0 - uVignette * smoothstep(0.4, 1.0, distance(uv, vec2(0.5)) * 1.35);
+    alpha *= clamp(vig, 0.0, 1.0);
+  }
 
   gl_FragColor = vec4(color, alpha);
 }
@@ -181,25 +230,42 @@ export default function createPurpleWaveField(container) {
 
   // ── Mutable runtime state — mutate freely, animation loop reads each frame ──
   const state = {
-    bloom:          true,
-    bloomStrength:  0.8,
-    dof:            true,
-    focusDistance:   50.0,
-    dofStrength:    0.020,
-    waves:          true,
-    waveSpeed:      0.15,
-    waveAmplitude:  3.0,
-    mouse:          true,
-    mouseRadius:    20.0,
-    mousePullMax:   6.0,
-    cameraDrift:    true,
-    colorPulse:     false,
-    colorPulseSpeed: 0.3,
+    bloom:            true,
+    bloomStrength:    0.8,
+    dof:              true,
+    focusDistance:    50.0,
+    dofStrength:      0.020,
+    waves:            true,
+    waveSpeed:        0.15,
+    waveAmplitude:    3.0,
+    mouse:            true,
+    mouseRadius:      20.0,
+    mousePullMax:     6.0,
+    ripples:          true,
+    rippleStrength:   1.0,
+    sparkle:          true,
+    sparkleStrength:  0.4,
+    aurora:           false,
+    auroraStrength:   0.5,
+    cameraDrift:      true,
+    colorPulse:       false,
+    colorPulseSpeed:  0.3,
+    vignette:         true,
+    vignetteStrength: 0.5,
+    exposure:         1.0,
+    autoQuality:      true,
+    colorCore:        '#a855f7',
+    colorCrest:       '#c4b5fd',
+    // read-only diagnostics (underscore keys are not meant to be set)
+    _fps: 0,
+    _dpr: Math.min(window.devicePixelRatio, 2),
   };
 
   // ── Renderer ──────────────────────────────────────────────────────────────
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  const maxDpr = Math.min(window.devicePixelRatio, 2);
+  let currentDpr = maxDpr;
+  renderer.setPixelRatio(currentDpr);
   renderer.setClearColor(0x000000, 1);
   container.appendChild(renderer.domElement);
 
@@ -233,26 +299,34 @@ export default function createPurpleWaveField(container) {
   geometry.setAttribute('aGridCoord', new THREE.BufferAttribute(gridCoords, 2));
 
   // ── Shader material ──────────────────────────────────────────────────────
-  const coreColor  = new THREE.Color('#a855f7');
-  const crestColor = new THREE.Color('#c4b5fd');
+  const rippleUniform = Array.from({ length: MAX_RIPPLES }, () => new THREE.Vector4());
 
   const material = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
     uniforms: {
-      uTime:          { value: 0 },
-      uAmplitude:     { value: state.waveAmplitude },
-      uColorCore:     { value: new THREE.Vector3(coreColor.r,  coreColor.g,  coreColor.b) },
-      uColorCrest:    { value: new THREE.Vector3(crestColor.r, crestColor.g, crestColor.b) },
-      uMouseWorld:    { value: new THREE.Vector3(0, 0, -9999) },
-      uMouseStrength: { value: 0 },
-      uMouseRadius:   { value: state.mouseRadius },
-      uMousePullMax:  { value: state.mousePullMax },
-      uMouseLift:     { value: 2.5 },
+      uTime:           { value: 0 },
+      uRealTime:       { value: 0 },
+      uAmplitude:      { value: state.waveAmplitude },
+      uColorCore:      { value: new THREE.Color(state.colorCore) },
+      uColorCrest:     { value: new THREE.Color(state.colorCrest) },
+      uMouseWorld:     { value: new THREE.Vector3(0, 0, -9999) },
+      uMouseStrength:  { value: 0 },
+      uMouseRadius:    { value: state.mouseRadius },
+      uMousePullMax:   { value: state.mousePullMax },
+      uMouseLift:      { value: 2.5 },
       uFocusDistance:  { value: state.focusDistance },
-      uDofStrength:   { value: state.dofStrength },
-      uDofMaxBlur:    { value: 2.5 },
-      uHueShift:      { value: 0 },
+      uDofStrength:    { value: state.dofStrength },
+      uDofMaxBlur:     { value: 2.5 },
+      uHueShift:       { value: 0 },
+      uExposure:       { value: state.exposure },
+      uVignette:       { value: state.vignetteStrength },
+      uResolution:     { value: new THREE.Vector2(1, 1) },
+      uSparkle:        { value: 0 },
+      uAurora:         { value: 0 },
+      uRippleStrength: { value: state.rippleStrength },
+      uRipples:        { value: rippleUniform },
+      uRippleCount:    { value: 0 },
     },
     transparent: true,
     blending:    THREE.AdditiveBlending,
@@ -279,26 +353,36 @@ export default function createPurpleWaveField(container) {
     renderer.setSize(w, h);
     composer.setSize(w, h);
     bloom.resolution.set(w, h);
+    material.uniforms.uResolution.value.set(w * currentDpr, h * currentDpr);
   }
   window.addEventListener('resize', onResize);
   onResize();
 
+  function applyDpr(dpr) {
+    currentDpr = dpr;
+    state._dpr = dpr;
+    renderer.setPixelRatio(dpr);
+    onResize();
+  }
+
   // ── Reduced-motion ────────────────────────────────────────────────────────
   const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   let reducedMotion = motionQuery.matches;
-  motionQuery.addEventListener('change', (e) => { reducedMotion = e.matches; });
+  const onMotionChange = (e) => { reducedMotion = e.matches; };
+  motionQuery.addEventListener('change', onMotionChange);
 
   // ── Visibility ────────────────────────────────────────────────────────────
   let visible = true, onScreen = true;
-  document.addEventListener('visibilitychange', () => { visible = !document.hidden; });
+  const onVisibility = () => { visible = !document.hidden; };
+  document.addEventListener('visibilitychange', onVisibility);
   const observer = new IntersectionObserver(
     ([e]) => { onScreen = e.isIntersecting; }, { threshold: 0 }
   );
   observer.observe(container);
 
-  // ── Mouse / touch ─────────────────────────────────────────────────────────
+  // ── Pointer interaction (unified mouse + touch via pointer events) ──────
   const raycaster   = new THREE.Raycaster();
-  const mouseNDC    = new THREE.Vector2();
+  const pointerNDC  = new THREE.Vector2();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const hitPoint    = new THREE.Vector3();
 
@@ -307,57 +391,114 @@ export default function createPurpleWaveField(container) {
     velocity: 0, strength: 0, active: false,
   };
 
-  function onPointerMove(px, py) {
+  const ripplePool = [];   // { x, z, t0 }
+
+  function raycastGround(px, py) {
     const rect = container.getBoundingClientRect();
-    mouseNDC.x =  ((px - rect.left) / rect.width)  * 2 - 1;
-    mouseNDC.y = -((py - rect.top)  / rect.height) * 2 + 1;
-    raycaster.setFromCamera(mouseNDC, camera);
-    if (raycaster.ray.intersectPlane(groundPlane, hitPoint)) {
+    pointerNDC.x =  ((px - rect.left) / rect.width)  * 2 - 1;
+    pointerNDC.y = -((py - rect.top)  / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNDC, camera);
+    return raycaster.ray.intersectPlane(groundPlane, hitPoint);
+  }
+
+  function onPointerMove(e) {
+    if (raycastGround(e.clientX, e.clientY)) {
       if (mouse.active) mouse.velocity = hitPoint.distanceTo(mouse.world);
       mouse.world.copy(hitPoint);
       mouse.active = true;
     }
   }
 
-  container.addEventListener('mousemove', (e) => onPointerMove(e.clientX, e.clientY));
-  container.addEventListener('touchmove', (e) => {
-    if (e.touches.length) onPointerMove(e.touches[0].clientX, e.touches[0].clientY);
-  }, { passive: true });
-  container.addEventListener('mouseleave', () => { mouse.active = false; });
-  container.addEventListener('touchend',   () => { mouse.active = false; });
+  function onPointerDown(e) {
+    if (!state.ripples) return;
+    if (raycastGround(e.clientX, e.clientY)) {
+      if (ripplePool.length >= MAX_RIPPLES) ripplePool.shift();
+      ripplePool.push({ x: hitPoint.x, z: hitPoint.z, t0: realElapsed });
+    }
+  }
+
+  function onPointerLeave() { mouse.active = false; }
+
+  container.addEventListener('pointermove',  onPointerMove);
+  container.addEventListener('pointerdown',  onPointerDown);
+  container.addEventListener('pointerleave', onPointerLeave);
 
   // ── Animation loop ────────────────────────────────────────────────────────
   const clock = new THREE.Clock();
-  let animId = null, elapsed = 0, hueShift = 0;
+  let animId = null, elapsed = 0, realElapsed = 0, hueShift = 0;
+  let fpsFrames = 0, fpsTimer = 0;
+  let lastCore = state.colorCore, lastCrest = state.colorCrest;
 
   function animate() {
     animId = requestAnimationFrame(animate);
-    if (!visible || !onScreen) return;
+    if (!visible || !onScreen) { clock.getDelta(); return; }
 
-    const delta = clock.getDelta();
+    const rawDelta = clock.getDelta();
+    const delta = Math.min(rawDelta, 0.05);   // clamp tab-switch jumps
     const speed = reducedMotion ? state.waveSpeed * 0.05 : state.waveSpeed;
-    elapsed += delta * speed;
+    elapsed     += delta * speed;
+    realElapsed += delta;
+
+    // ── FPS tracking + adaptive resolution ──
+    fpsFrames++; fpsTimer += rawDelta;
+    if (fpsTimer >= 0.75) {
+      const fps = fpsFrames / fpsTimer;
+      state._fps = Math.round(fps);
+      fpsFrames = 0; fpsTimer = 0;
+      if (state.autoQuality) {
+        if (fps < 45 && currentDpr > 0.75) applyDpr(Math.max(0.75, currentDpr - 0.25));
+        else if (fps > 58 && currentDpr < maxDpr) applyDpr(Math.min(maxDpr, currentDpr + 0.25));
+      } else if (currentDpr !== maxDpr) {
+        applyDpr(maxDpr);
+      }
+    }
 
     // ── Apply state to uniforms ──
-    material.uniforms.uTime.value = elapsed;
-    material.uniforms.uAmplitude.value  = state.waves ? state.waveAmplitude : 0;
-    material.uniforms.uMouseRadius.value  = state.mouseRadius;
-    material.uniforms.uMousePullMax.value = state.mouse ? state.mousePullMax : 0;
-    material.uniforms.uDofStrength.value  = state.dof ? state.dofStrength : 0;
-    material.uniforms.uFocusDistance.value = state.focusDistance;
+    const u = material.uniforms;
+    u.uTime.value     = elapsed;
+    u.uRealTime.value = realElapsed;
+    u.uAmplitude.value     = state.waves ? state.waveAmplitude : 0;
+    u.uMouseRadius.value   = state.mouseRadius;
+    u.uMousePullMax.value  = state.mouse ? state.mousePullMax : 0;
+    u.uDofStrength.value   = state.dof ? state.dofStrength : 0;
+    u.uFocusDistance.value = state.focusDistance;
+    u.uExposure.value      = state.exposure;
+    u.uVignette.value      = state.vignette ? state.vignetteStrength : 0;
+    u.uSparkle.value       = state.sparkle ? state.sparkleStrength : 0;
+    u.uAurora.value        = state.aurora ? state.auroraStrength : 0;
+    u.uRippleStrength.value = state.rippleStrength;
     bloom.strength = state.bloom ? state.bloomStrength : 0;
 
-    // Color pulse
+    // Colors — re-parse only when changed
+    if (state.colorCore !== lastCore) {
+      lastCore = state.colorCore;
+      u.uColorCore.value.set(lastCore);
+    }
+    if (state.colorCrest !== lastCrest) {
+      lastCrest = state.colorCrest;
+      u.uColorCrest.value.set(lastCrest);
+    }
+
+    // Ripples — prune dead ones, upload the rest
+    while (ripplePool.length && realElapsed - ripplePool[0].t0 > RIPPLE_LIFE) {
+      ripplePool.shift();
+    }
+    for (let i = 0; i < ripplePool.length; i++) {
+      rippleUniform[i].set(ripplePool[i].x, ripplePool[i].z, ripplePool[i].t0, 0);
+    }
+    u.uRippleCount.value = ripplePool.length;
+
+    // Color pulse — advance hue, or unwind to nearest full turn when off
     if (state.colorPulse) {
       hueShift += delta * state.colorPulseSpeed;
     } else {
       const target = Math.round(hueShift / (Math.PI * 2)) * Math.PI * 2;
       hueShift += (target - hueShift) * 0.04;
-      if (Math.abs(hueShift) < 0.01) hueShift = 0;
+      if (Math.abs(hueShift - target) < 0.01) hueShift = target;
     }
-    material.uniforms.uHueShift.value = hueShift;
+    u.uHueShift.value = hueShift;
 
-    // Mouse magnet strength
+    // Mouse magnet strength — damped spring toward hover/velocity target
     if (state.mouse) {
       const basePull = mouse.active ? 0.45 : 0.0;
       const boost    = Math.min(mouse.velocity * 0.25, 0.55);
@@ -368,8 +509,8 @@ export default function createPurpleWaveField(container) {
       mouse.strength *= 0.9;
       mouse.velocity = 0;
     }
-    material.uniforms.uMouseWorld.value.copy(mouse.world);
-    material.uniforms.uMouseStrength.value = mouse.strength;
+    u.uMouseWorld.value.copy(mouse.world);
+    u.uMouseStrength.value = mouse.strength;
 
     // Camera drift
     if (state.cameraDrift && !reducedMotion) {
@@ -387,6 +528,11 @@ export default function createPurpleWaveField(container) {
   function dispose() {
     cancelAnimationFrame(animId);
     window.removeEventListener('resize', onResize);
+    document.removeEventListener('visibilitychange', onVisibility);
+    motionQuery.removeEventListener('change', onMotionChange);
+    container.removeEventListener('pointermove',  onPointerMove);
+    container.removeEventListener('pointerdown',  onPointerDown);
+    container.removeEventListener('pointerleave', onPointerLeave);
     observer.disconnect();
     geometry.dispose();
     material.dispose();
