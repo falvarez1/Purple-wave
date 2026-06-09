@@ -10,8 +10,9 @@ Animated purple particle wave field — a full-viewport hero background built wi
 
 ## Interactions
 
+- **WASD / arrow keys** — fly over the terrain as if it were infinite. Hold **Shift** to boost (2.5x). Movement has momentum, the camera banks into strafes, and the FOV widens with speed. The terrain never ends: the dot grid stays under the camera while the noise field scrolls in world space.
 - **Drag / hover** — the cursor acts as a magnet, pulling dots out of their grid with spring-like physics. Faster movement pulls harder.
-- **Click / tap** — spawns an expanding shockwave ripple across the field (up to 5 at once).
+- **Click / tap** — spawns an expanding shockwave ripple across the field (up to 5 at once). Ripples are anchored to the terrain, so they drift past while you fly.
 - **H key** — toggles the effects panel.
 
 ## Effects panel
@@ -24,6 +25,7 @@ Open with the gear button (top right) or the **H** key. Settings persist in `loc
 | Depth of Field | focus distance, blur (bokeh-style CoC, computed per vertex) |
 | Wave Motion | speed, amplitude |
 | Mouse Magnet | radius, pull |
+| Flight (WASD) | speed |
 | Click Ripples | strength |
 | Sparkle | amount (per-dot twinkle) |
 | Aurora Colors | amount (spatial hue drift across the field) |
@@ -52,7 +54,7 @@ state.aurora = true;
 dispose();
 ```
 
-`state` keys: `bloom`, `bloomStrength`, `dof`, `focusDistance`, `dofStrength`, `waves`, `waveSpeed`, `waveAmplitude`, `mouse`, `mouseRadius`, `mousePullMax`, `ripples`, `rippleStrength`, `sparkle`, `sparkleStrength`, `aurora`, `auroraStrength`, `cameraDrift`, `colorPulse`, `colorPulseSpeed`, `vignette`, `vignetteStrength`, `exposure`, `autoQuality`, `colorCore`, `colorCrest`. Read-only diagnostics: `_fps`, `_dpr`.
+`state` keys: `bloom`, `bloomStrength`, `dof`, `focusDistance`, `dofStrength`, `waves`, `waveSpeed`, `waveAmplitude`, `mouse`, `mouseRadius`, `mousePullMax`, `ripples`, `rippleStrength`, `flight`, `flightSpeed`, `sparkle`, `sparkleStrength`, `aurora`, `auroraStrength`, `cameraDrift`, `colorPulse`, `colorPulseSpeed`, `vignette`, `vignetteStrength`, `exposure`, `autoQuality`, `colorCore`, `colorCrest`. Read-only diagnostics: `_fps`, `_dpr`.
 
 ## Performance
 

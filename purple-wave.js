@@ -73,6 +73,7 @@ ${SNOISE_GLSL}
 
 uniform float uTime;          // wave-speed-scaled time (drives slow motion)
 uniform float uRealTime;      // wall-clock time (drives ripples & sparkle)
+uniform vec2  uWorldOffset;   // flight position — scrolls the terrain field
 uniform float uAmplitude;
 uniform vec3  uMouseWorld;
 uniform float uMouseStrength;
@@ -98,28 +99,32 @@ void main(){
   vec3 pos = position;
   float t = uTime;
 
+  // World-space terrain coordinate: the grid stays fixed under the camera
+  // while uWorldOffset scrolls the sampled field — infinite-flight treadmill.
+  vec2 gc = aGridCoord + uWorldOffset;
+
   // Layered noise for organic flowing-silk displacement
-  float n1 = snoise(vec3(aGridCoord * 0.015, t * 0.4)) * uAmplitude;
-  float n2 = snoise(vec3(aGridCoord.x * 0.04 + 97.0,
-                         aGridCoord.y * 0.03 + 31.0,
+  float n1 = snoise(vec3(gc * 0.015, t * 0.4)) * uAmplitude;
+  float n2 = snoise(vec3(gc.x * 0.04 + 97.0,
+                         gc.y * 0.03 + 31.0,
                          t * 0.7)) * uAmplitude * 0.45;
-  float n3 = snoise(vec3(aGridCoord.x * 0.09 + 210.0,
-                         aGridCoord.y * 0.07 + 140.0,
+  float n3 = snoise(vec3(gc.x * 0.09 + 210.0,
+                         gc.y * 0.07 + 140.0,
                          t * 1.1)) * uAmplitude * 0.2;
 
-  float sine = sin(aGridCoord.x * 0.025 + t * 0.55)
-             * cos(aGridCoord.y * 0.018 + t * 0.35)
+  float sine = sin(gc.x * 0.025 + t * 0.55)
+             * cos(gc.y * 0.018 + t * 0.35)
              * uAmplitude * 0.65;
 
   float elevation = n1 + n2 + n3 + sine;
 
   // Click shockwaves — expanding gaussian rings that decay over time.
-  // Elevation contribution also brightens the ring (vElevation drives color).
+  // Origins are stored in world coords so ripples flow past during flight.
   for (int i = 0; i < ${MAX_RIPPLES}; i++) {
     if (i >= uRippleCount) break;
     float age = uRealTime - uRipples[i].z;
     float radius = age * 22.0;                       // ring expansion speed
-    float dist = distance(aGridCoord, uRipples[i].xy);
+    float dist = distance(gc, uRipples[i].xy);
     float band = exp(-pow((dist - radius) * 0.35, 2.0));
     float decay = exp(-age * 1.1);
     elevation += band * decay * uRippleStrength * 3.5;
@@ -146,9 +151,10 @@ void main(){
   tw = tw * tw; tw = tw * tw;
   vSparkle = 1.0 + uSparkle * (tw * 1.8 - 0.3);
 
-  // Aurora — slow spatial hue drift, rotated in the fragment shader
+  // Aurora — slow spatial hue drift, rotated in the fragment shader.
+  // Sampled in world coords so the colors flow past during flight.
   vAurora = uAurora > 0.001
-    ? snoise(vec3(aGridCoord * 0.018 + 7.3, t * 0.5)) * uAurora * 2.6
+    ? snoise(vec3(gc * 0.018 + 7.3, t * 0.5)) * uAurora * 2.6
     : 0.0;
 
   vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
@@ -247,6 +253,8 @@ export default function createPurpleWaveField(container) {
     sparkleStrength:  0.4,
     aurora:           false,
     auroraStrength:   0.5,
+    flight:           true,
+    flightSpeed:      18.0,
     cameraDrift:      true,
     colorPulse:       false,
     colorPulseSpeed:  0.3,
@@ -307,6 +315,7 @@ export default function createPurpleWaveField(container) {
     uniforms: {
       uTime:           { value: 0 },
       uRealTime:       { value: 0 },
+      uWorldOffset:    { value: new THREE.Vector2(0, 0) },
       uAmplitude:      { value: state.waveAmplitude },
       uColorCore:      { value: new THREE.Color(state.colorCore) },
       uColorCrest:     { value: new THREE.Color(state.colorCrest) },
@@ -413,7 +422,12 @@ export default function createPurpleWaveField(container) {
     if (!state.ripples) return;
     if (raycastGround(e.clientX, e.clientY)) {
       if (ripplePool.length >= MAX_RIPPLES) ripplePool.shift();
-      ripplePool.push({ x: hitPoint.x, z: hitPoint.z, t0: realElapsed });
+      // Store in world coords so the ring stays with the terrain during flight
+      ripplePool.push({
+        x: hitPoint.x + worldOffset.x,
+        z: hitPoint.z + worldOffset.y,
+        t0: realElapsed,
+      });
     }
   }
 
@@ -423,11 +437,35 @@ export default function createPurpleWaveField(container) {
   container.addEventListener('pointerdown',  onPointerDown);
   container.addEventListener('pointerleave', onPointerLeave);
 
+  // ── Keyboard flight (WASD / arrows, Shift to boost) ──────────────────────
+  const keys = Object.create(null);
+
+  function isUiTarget(e) {
+    return e.target && e.target.closest &&
+           e.target.closest('input, select, textarea, button');
+  }
+
+  function onKeyDown(e) {
+    if (isUiTarget(e)) return;
+    keys[e.key.toLowerCase()] = true;
+  }
+
+  function onKeyUp(e) {
+    keys[e.key.toLowerCase()] = false;
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup',   onKeyUp);
+
   // ── Animation loop ────────────────────────────────────────────────────────
   const clock = new THREE.Clock();
   let animId = null, elapsed = 0, realElapsed = 0, hueShift = 0;
   let fpsFrames = 0, fpsTimer = 0;
   let lastCore = state.colorCore, lastCrest = state.colorCrest;
+  const worldOffset = new THREE.Vector2(0, 0);   // flight position (world XZ)
+  const flightVel   = new THREE.Vector2(0, 0);
+  const flightInput = new THREE.Vector2(0, 0);
+  let currentFov = 60;
 
   function animate() {
     animId = requestAnimationFrame(animate);
@@ -512,11 +550,42 @@ export default function createPurpleWaveField(container) {
     u.uMouseWorld.value.copy(mouse.world);
     u.uMouseStrength.value = mouse.strength;
 
-    // Camera drift
-    if (state.cameraDrift && !reducedMotion) {
-      camera.position.x = camBase.x + Math.sin(elapsed * 0.6) * 0.8;
-      camera.position.y = camBase.y + Math.cos(elapsed * 0.45) * 0.4;
-      camera.lookAt(0, 0, 55);
+    // ── Flight: WASD/arrows scroll the terrain field with momentum ──
+    // Camera looks toward +z, so screen-right is world −x:
+    // W/S → ±z, A → +x (left), D → −x (right).
+    flightInput.set(0, 0);
+    if (state.flight && !reducedMotion) {
+      flightInput.x = (keys['a'] || keys['arrowleft']  ? 1 : 0)
+                    - (keys['d'] || keys['arrowright'] ? 1 : 0);
+      flightInput.y = (keys['w'] || keys['arrowup']    ? 1 : 0)
+                    - (keys['s'] || keys['arrowdown']  ? 1 : 0);
+    }
+    const boost = keys['shift'] ? 2.5 : 1;
+    if (flightInput.lengthSq() > 0) {
+      flightInput.normalize().multiplyScalar(state.flightSpeed * boost);
+    }
+    // Exponential smoothing toward target velocity = damped flight momentum
+    const smoothing = 1 - Math.exp(-2.5 * delta);
+    flightVel.lerp(flightInput, smoothing);
+    worldOffset.addScaledVector(flightVel, delta);
+    u.uWorldOffset.value.copy(worldOffset);
+
+    // ── Camera: drift + flight banking ──
+    camera.position.x = camBase.x +
+      (state.cameraDrift && !reducedMotion ? Math.sin(elapsed * 0.6) * 0.8 : 0);
+    camera.position.y = camBase.y +
+      (state.cameraDrift && !reducedMotion ? Math.cos(elapsed * 0.45) * 0.4 : 0);
+    camera.lookAt(0, 0, 55);
+    // Bank into strafes, pitch slightly into forward motion
+    camera.rotateZ(THREE.MathUtils.clamp(flightVel.x * 0.004, -0.13, 0.13));
+    camera.rotateX(THREE.MathUtils.clamp(-flightVel.y * 0.0012, -0.05, 0.05));
+    // Subtle FOV widening with speed for a sense of acceleration
+    const speedRatio = Math.min(flightVel.length() / (state.flightSpeed * 2.5), 1);
+    const targetFov = 60 + speedRatio * 7;
+    currentFov += (targetFov - currentFov) * smoothing;
+    if (Math.abs(camera.fov - currentFov) > 0.01) {
+      camera.fov = currentFov;
+      camera.updateProjectionMatrix();
     }
 
     composer.render();
@@ -533,6 +602,8 @@ export default function createPurpleWaveField(container) {
     container.removeEventListener('pointermove',  onPointerMove);
     container.removeEventListener('pointerdown',  onPointerDown);
     container.removeEventListener('pointerleave', onPointerLeave);
+    window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup',   onKeyUp);
     observer.disconnect();
     geometry.dispose();
     material.dispose();
